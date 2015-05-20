@@ -1296,3 +1296,290 @@ snowman.qcimport <- function(file) {
   return(list(mapq=df.mapq, nm=df.nm, isize=df.isize, xp=df.xp, as=df.as, phred=df.phred, len=df.len, clip=df.clip))
   
 }
+
+plot.cancer.genes <- function(ra, opt, max.rank = NULL) {
+
+  ## data table to GRanges to do overlaps
+  gr <- dt2gr(ra)
+  uid = mcols(gr)$uid
+  mcols(gr) = NULL
+  grl <- split(gr, uid)
+  
+  ###############################################
+  ## check if anything overlaps with cancer genes
+  ###############################################
+  ##cgc.genes <- track.load('cgc')
+  cgc = read.delim(file.path(Sys.getenv("GIT_HOME"), 'ICGC_SV', 'data', 'cancer_gene_census.tsv'), strings = F)
+  genes <- readRDS(file.path(Sys.getenv("GIT_HOME"), "ICGC_SV", "data", "gr.allgenes.rds"))
+  cgc.genes <- genes[genes$gene %in% cgc$Symbol]
+  fo <- gr.findoverlaps(gr, cgc.genes + 5e4)
+  tab <- table(fo$subject.id)
+  gene.nums = as.numeric(names(tab))
+  names(tab) <- cgc.genes$gene[gene.nums]
+  tab.lenscale = tab / width(cgc.genes[gene.nums])
+  
+  ## get the genes track data
+  suppressWarnings(td.rg.cgc <- track.refgene(genes = cgc.genes$gene, height=3))
+
+  ord = order(tab.lenscale, decreasing=T)
+  dir.create(file.path(opt$outdir, "CGCgenes"), showWarnings=FALSE)
+
+  if (is.null(max.rank))
+    max.rank = length(ord)
+  #assert("max.rank must be <= number of cancer genes (440)", max.rank <= length(ord))
+  
+  ###################
+  ## MAKE PLOTS FOR ALL CANCER GENES
+  ###################
+  dum <- sapply(seq_along(ord)[1:max.rank], function(x) 
+                {
+                  gene = names(tab.lenscale[ord[x]])
+                  ## find the partners
+                  gene.window = gr.pad(cgc.genes[cgc.genes$gene == gene], 5e4)
+                  rar.hits = grl[ceiling(gr.findoverlaps(gr, gene.window)$query.id/2)]
+                  suppressWarnings(windows <- streduce(grbind(gr.pad(streduce(rar.hits), 5e4), gene.window)))
+                  nindiv = length(unique(mcols(rar.hits)$individual))
+                  
+                  print(paste("plotting CGC gene", gene))
+                  pdf(file.path(opt$outdir, "CGCgenes", paste("rank_",sprintf("%04d",x),"_",names(tab.lenscale[ord[x]]), "_NIndiv_", nindiv, ".pdf", sep="")))
+                                        #pdf(file.path(opt$outdir, "ROS1_special.pdf"))  
+                  td.rg.cgc$xaxis.newline = T
+                  td.rg.cgc$xaxis.cex = 0.5
+                  td.rg.cgc$xaxis.cex.label = 0.5
+                  td.rg.cgc$xaxis.nticks = 2
+                  display(td.rg.cgc, links=rar.hits, window=windows)
+                  dev.off()
+                })
+  
+}
+
+
+plot.matrix <- function(opt, ra, bin=5e6) {
+  
+  grt  = gr.tile(gr.all(), w=bin)
+  mat <- sig.tri.matrix(ra, grt, log=TRUE)
+  mat.raw <- sig.tri.matrix(ra, grt, log=FALSE)
+  allopts = list()
+  td.mat  <- do.call('trackData', c(allopts, list(grt, mdata=mat, triangle=TRUE,
+                                                  cmap.min=min(mat), cmap.max=max(mat)+0.1, track.name='Triangle',
+                                                  height=25, sep.lwd=0.5, m.bg.col='white',
+                                                  track.name='Breakpoint-pair Heatmap', islog=TRUE, xaxis.nticks=0,
+                                                  xaxis.prefix="", xaxis.chronly=TRUE)))
+  td.mat.raw  <- do.call('trackData', c(allopts, list(grt, mdata=mat.raw, triangle=TRUE,
+                                                      cmap.min=min(mat.raw), cmap.max=max(mat.raw)+1, track.name='Triangle',
+                                                      height=25, sep.lwd=0.5, m.bg.col='white',
+                                                      track.name='Breakpoint-pair Heatmap', islog=FALSE, xaxis.nticks=0,
+                                                      xaxis.prefix="", xaxis.chronly=TRUE)))
+  
+  pdf("overview_matrix.pdf", width=12, height=15)
+  display(td.mat, windows=streduce(gr.all()))
+  dev.off()
+  
+  pdf("overview_matrix_raw.pdf", width=12, height=12)
+  display(td.mat.raw, windows=streduce(gr.all()))
+  dev.off()
+  
+  ## per chrom
+  grt  = gr.tile(gr.all(), w=bin)
+  td.mat  <- do.call('trackData', c(allopts, list(grt, mdata=mat, triangle=TRUE,
+                                                  cmap.min=min(mat)+0.1, cmap.max=max(mat)+0.1, track.name='Triangle',
+                                                  height=25, sep.lwd=0.5, m.bg.col='white',
+                                                  track.name='Breakpoint-pair Heatmap', islog=TRUE, xaxis.nticks=0,
+                                                  xaxis.prefix="", xaxis.chronly=TRUE)))
+  if (FALSE)
+  dum <- lapply(seq(23), function(x) {
+    print(paste("plotting for chr", x))
+    pdf( paste("chr",x,"_matrix.pdf",sep=""), width=12, height=12)
+    display(td.mat, windows=streduce(gr.all()[x]))
+    dev.off()
+  })
+  
+  
+}
+
+#################
+## power.law.plot
+#################
+
+round.n <- function(x, n) n * round(x / n)
+
+lm_eqn <- function(m){
+    eq <- substitute(italic(y) == a + b %.% italic(x)*","~~italic(r)^2~"="~r2,
+                              list(a = format(coef(m)[1], digits = 2),
+                                                 b = format(coef(m)[2], digits = 2),
+                                                r2 = format(summary(m)$r.squared, digits = 3)))
+    as.character(as.expression(eq));
+}
+
+power.law.plot <- function(pspan, plotname) {
+  print(paste('...making power-law plot for', plotname))
+  ex <- ecdf(pspan[pspan > 0])
+  #grid <- c(seq(0,10000,5), seq(10000,10^7,100))
+  df = data.frame(pspan = pspan, cdf = ex(pspan), pspan.log = log(pspan,10), cdf.log = log(ex(pspan), 10))
+  df <- df[df$cdf.log > -1000,] ## get rid of -Inf
+  lm.s <- lm(df$cdf.log ~ df$pspan.log)
+  lm.eq = lm_eqn(lm.s)
+
+  yb = c(0.01,0.02,0.03,0.04,0.05,0.10,0.2, 0.3, 0.4,0.5,0.75,1)
+
+  pdf(opt$outdir, plotname, width=5,height=5)
+  print(g <- ggplot() + geom_point(data=df, aes(x=pspan.log, y=cdf.log), size=1, color="blue") +
+    geom_smooth(data=df, aes(x=pspan.log, y=cdf.log), method="lm",se=F) +
+        geom_text(aes(x=4.5,y=log(0.01,10), label=lm.eq), label=lm.eq, parse=T) +
+    theme_bw() + ylab("CDF") + xlab("Span (bp)") +
+    scale_y_continuous(breaks=log(yb,10), labels=format(yb,digits=2), limits=c(log(yb[1],10), 0)) +
+    scale_x_continuous(breaks=seq(0,7), labels=parse(text=paste('10', seq(0,7), sep='^'))))
+  dev.off()
+}
+
+#' Read a sifs file
+read.sifs <- function(x="/cga/fh/pancan_data/pcawg_calls/pcawg_train2_metadata/PCAWG_Data_Freeze_Train_2.0_Paired_Download_table_2014_11_18-2171_Tumour-Normal_pairs_2014_11_18.tsv")
+  {
+    sifs <- data.table(read.delim(x, header=TRUE, sep='\t', stringsAsFactors=FALSE))
+    sifs[, short_code := gsub("([A-Z]+).*", '\\1',Project.Code) ]
+    setkey(sifs, Tumour.Analyzed.Sample.Aliquot.GUUID)  
+    return(sifs)
+  }
+
+#' Plot the distribution of events from breaks and sifs file
+sig.type.plot <- function(ra, sifs=read.sifs("/cga/fh/pancan_data/pcawg_calls/pcawg_train2_metadata/PCAWG_Data_Freeze_Train_2.0_Paired_Download_table_2014_11_18-2171_Tumour-Normal_pairs_2014_11_18.tsv"))
+  {
+    if (!"analysis.id" %in% colnames(ra))
+      ra$analysis.id <- gsub("(.*?).svcp_.*", "\\1", ra$uid)
+    if (!"short_code" %in% colnames(ra))
+      ra$short_code <- sifs$short_code[match(ra$analysis.id, sifs$Tumour.Analyzed.Sample.Aliquot.GUUID)]
+
+    ## get counts
+    ra[, per.sample.counts := nrow(.SD), by="analysis.id"]
+
+    ## get the median-events
+    ra[, median.counts := median(per.sample.counts), by=short_code]
+    
+    df <- data.frame(short.code = ra$short_code, analsis.id = ra$analysis.id, per.sample.counts = ra$per.sample.counts, median.counts=ra$median.counts)
+    df$short.code = as.character(df$short.code)
+    df <- df[!duplicated(df), ]
+
+    df <- df[!is.na(df$short.code), ]
+    df <- df[order(df$median.counts, decreasing=TRUE),]
+    df$short.code <- factor(df$short.code, levels=unique(df$short.code))
+    
+    g <- ggplot(df, aes(short.code, per.sample.counts/2)) + geom_boxplot() + theme_bw() + xlab("") + ylab("Events per sample")
+    return(g)
+  }
+
+sig.plot.gene.hits <- function(ra, short_code=NA, pad=0, exclude.fragile = FALSE, exclude.large=FALSE)
+  {
+    ## gene counts per type
+    setkey(ra, GENE, short_code)
+    ra[, gene.counts.per.type := sum(!duplicated(individual)), by=c("GENE","short_code")]
+    ra[, type.count := sum(!duplicated(individual)), by="short_code"]
+    UNIQ_SAMPLES = sum(!duplicated(ra$individual))
+    ra[, gene.counts.per.type.p.value := min(-log(1-sum(dbinom(0:gene.counts.per.type[1], size=type.count[1], prob=gene.count.unique.sample[1] / UNIQ_SAMPLES)),10),15), by=c("GENE", "short_code")]
+
+    ## trime down
+    setkey(ra, short_code) 
+    if (!is.na(short_code))
+      ra <- ra[short_code]
+    
+    genes <- readRDS(file.path(Sys.getenv("GIT_HOME"), "ICGC_SV", "data", "gr.allgenes.rds"))
+    genes <- genes[!duplicated(genes$gene), ]
+    suppressWarnings(genes <- c(genes, GRanges(4, IRanges(91048684, 92523370), gene="CCSER1")))
+    suppressWarnings(genes <- c(genes, GRanges(11, IRanges(78363876, 79151992), gene="TENM4")))
+    suppressWarnings(genes <- c(genes, GRanges(2, IRanges(51259739, 52635055), gene="AC007682.1")))
+    suppressWarnings(genes <- c(genes, GRanges(17, IRanges(31340105, 32501983), gene="ASIC2")))
+    suppressWarnings(genes <- c(genes, GRanges(5, IRanges(166711804, 167691162), gene="TENM2")))
+    gene.lengths <- structure(width(genes), names=genes$gene)
+
+    ## get fragile genes
+    frag <- fread(file.path(Sys.getenv("GIT_HOME"), "ICGC_SV", "data", "common_fragile_sites_fixed.bed"))
+    frag <- gr.nochr(GRanges(frag$V1, IRanges(as.numeric(frag$V2), as.numeric(frag$V3))))
+    frag <- sort(frag)
+    genes$class = ""
+    genes$class[gr.findoverlaps(genes, frag)$query.id] = "Fragile"
+    genes$class[grepl("^OR", genes$gene)] <- "Olfactory"
+    genes$class[grepl("^HIST", genes$gene)] <- "Histone"
+    genes$class[grepl("^SNO", genes$gene)] <- "SnoRNA"
+    genes$class[grepl("^HLA", genes$gene)] <- "HLA"
+
+    ## cancer genes
+    cgc = read.delim(file.path(Sys.getenv("GIT_HOME"), 'ICGC_SV', 'data', 'cancer_gene_census.tsv'), strings = F)
+    genes$class[genes$gene %in% cgc$Symbol & nchar(genes$class)==0] <- "Cancer Gene Census"
+    
+    ## manually annotate some
+    genes$class[genes$gene %in% c("CSMD1","CCSER1", "GMDS")] <- "Fragile"
+    genes$class[width(genes) > 6.5e5 & genes$class == ""] <- "Large (top 1%)"
+    genes$class[width(genes) > 2.45e5 & genes$class == ""] <- "Large (top 5%)"
+    
+    dt.genes <- data.table(gene.width=width(genes), GENE=genes$gene, gene.class=genes$class)
+    setkey(dt.genes, GENE)
+    setkey(ra, GENE)
+    ra[, gene.count := nrow(.SD), by="GENE"]
+    ra[, gene.count.unique.sample := sum(!duplicated(individual)), by="GENE"]
+    setkey(ra, GENE)
+    ra <- dt.genes[ra]
+    
+    ra[, gene.count.per.kb := nrow(.SD) / gene.width * 1000, by="GENE"]
+    ra[, gene.count.unique.sample.per.kb := sum(!duplicated(individual)) / gene.width * 1000, by="GENE"]
+    ra$gene.class[nchar(ra$gene.class) == 0] <- "none"
+    
+    ## plot params
+    groups <- c("lightblue", "black", "darkgreen", "peachpuff", "grey70", "gold", "seagreen1", "seagreen4", "red")
+    cols <- c("Fragile", "none", "Olfactory", "Histone", "SnoRNA", "HLA", "Large (top 1%)", "Large (top 5%)", "Cancer Gene Census")
+
+    ## trim if need
+    if (exclude.fragile)
+      ra <- ra[!ra$gene.class %in% c('Fragile')]
+    if (exclude.large)
+      ra <- ra[!ra$gene.class %in% c('Large (top 1%)', 'Large (top 5%)')]
+
+    
+    ## plot by counts
+    setkey(ra, gene.count)
+    df <- data.frame(gene=ra$GENE, count=ra$gene.count.unique.sample, gene.class=ra$gene.class)
+    df <- df[!duplicated(df),]
+    df$gene <- as.character(df$gene)
+    df$gene[is.na(df$gene)] <- df$gene[is.na(df$gene)] <- "NO GENE"
+    df <- df[order(df$count, decreasing=TRUE), ]
+    g1 <- ggplot(df[2:100,], aes(x=factor(gene, levels=gene), y=count, fill=gene.class), color=NA) + geom_bar(stat='identity') + theme_bw() +
+      theme(axis.text.x=element_text(angle=90)) + xlab("Gene") + ylab("# Individuals") +
+      scale_fill_manual(name="Gene class", values=groups, limits=cols)
+    
+    ## plot by counts / Kb
+    setkey(ra, gene.count)
+    df <- data.frame(gene=ra$GENE, count=ra$gene.count.unique.sample.per.kb, gene.class=ra$gene.class)
+    df <- df[!duplicated(df),]
+    df$gene <- as.character(df$gene)
+    df$gene[is.na(df$gene)] <- df$gene[is.na(df$gene)] <- "NO GENE"
+    df <- df[order(df$count, decreasing=TRUE), ]
+    g2 <- ggplot(df[2:50,], aes(x=factor(gene, levels=df$gene), y=count, fill=gene.class), color=NA) + geom_bar(stat='identity') + theme_bw() +
+      theme(axis.text.x=element_text(angle=90)) + xlab("Gene") + ylab("Breaks per Kb") +
+      scale_fill_manual(name="Gene class", values=groups,limits=cols)
+    
+    ## plot by type pval
+    df <- data.frame(gene=ra$GENE, count=ra$gene.counts.per.type.p.value, gene.class=ra$gene.class)
+    df <- df[!duplicated(df),]
+    df$gene <- as.character(df$gene)
+    df$gene[is.na(df$gene)] <- df$gene[is.na(df$gene)] <- "NO GENE"
+    df <- df[order(df$count, decreasing=TRUE), ]
+    g3 <- ggplot(df[2:100,], aes(x=factor(gene, levels=gene), y=count, fill=gene.class), color=NA) + geom_bar(stat='identity') + theme_bw() +
+      theme(axis.text.x=element_text(angle=90)) + xlab("Gene") + ylab("-log10 Type Enrichment P-value") +
+      scale_fill_manual(name="Gene class", values=groups, limits=cols)
+    
+    return(list(g1, g2, g3))
+  }
+
+
+breaks.dt2grl <- function(ra)
+  {
+    ##
+
+    hg19_len <- hg_seqlengths()
+    radf <- data.frame(seqnames=ra$seqnames, start=ra$start, end=ra$end, uid=ra$uid, strand=ra$strand, col=ra$col, border=ra$border)
+    ra.ul = gr.fix(dt2gr(data.table(radf)),hg19_len)
+    ra.bound = split(ra.ul, ra$uid)
+    
+    mcols(ra.bound)$col <- ra.ul$col[seq(1,length(ra.ul), by=2)]
+    mcols(ra.bound)$border <- ra.ul$border[seq(1,length(ra.ul), by=2)]
+
+    return (ra.bound)
+  }

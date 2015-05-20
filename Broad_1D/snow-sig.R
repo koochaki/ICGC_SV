@@ -27,35 +27,25 @@ if (!file.exists(opt$outdir))
   if (!dir.create(opt$outdir,recursive=TRUE))
   stop(paste("Cannot create ",opt$outdir,sep=" "))
 
-
-#source(file.path(Sys.getenv('GIT_HOME'), 'isva', 'TaigaSig', 'sig.setup.R'))
-  
-suppressMessages(suppressWarnings(require(data.table, quietly=TRUE)))
+## load the breakpoints raRDS if it exists
+suppressMessages(suppressWarnings(library(data.table, quietly=TRUE)))
 ra = data.table()
 if (file.exists(opt$raRDS)) {
   print(paste("importing events from", opt$raRDS))
   ra <- readRDS(opt$raRDS)
+  print(paste("imported", nrow(ra), "breakpoints"))
 }
 
+## check that there is some data provided
 if (!file.exists(opt$VCFlist) && nrow(ra) == 0) {
   print(print_help(parseobj))
   stop("Need to supply either file with a list of VCFfiles or pre-loaded ra rds")
 }
 
-bedA.exists <- file.exists(opt$bedA)
-if (!bedA.exists && nchar(opt$bedA)) 
-  stop(paste("BED file supplied for A does not exist:", opt$bedA))
-bedB.exists <- file.exists(opt$bedB)
-if (!bedB.exists && nchar(opt$bedB)) 
-  stop(paste("BED file supplied for B does not exist:", opt$bedB))
-if (!(nchar(opt$bedA) == 0) ==(nchar(opt$bedB)==0))
-  stop(print("Can supply zero or two BED files, but not one (for A-B test)"))
-
 print(paste("...setting output directory to", opt$outdir))
 setwd(opt$outdir)
-
-print("...sourcing all R libraries")
-source.all()
+#print("...sourcing all R libraries")
+##source.all()
 
 print(paste("Output directory:", getwd()))
 print(paste("CPU cores:", opt$cores))
@@ -67,150 +57,16 @@ if (file.exists(opt$VCFlist))
 if (nrow(ra) > 0)
   print(paste("Loaded", nrow(ra), "breakpoints from file", opt$raRDS))
 
-
 chr_colors = structure(c("#0B9599","#05D21F","#33CAC9","#81535E","#000000","#23A7E9","#2B75D2","#9B9B51",
   "#D04AE0","#07B7CC","#C90B9C","#05AC12","#B22F6C","#D05958","#911FC0","#7A1C38",
   "#294C4A","#17D65B","#29FDA1","#076FE4","#B534BE","#02F600","#DBA809","#704C91",
   "#6A1E70"), names=c(1:22, 'X', 'Y', 'M'))
 
-plot.cancer.genes <- function(ra, opt, max.rank = NULL) {
+################################################
+#### DATA LOADING AND FILTERING
+################################################
 
-  ## data table to GRanges to do overlaps
-  gr <- dt2gr(ra)
-  uid = mcols(gr)$uid
-  mcols(gr) = NULL
-  grl <- split(gr, uid)
-  
-  ###############################################
-  ## check if anything overlaps with cancer genes
-  ###############################################
-  cgc.genes <- track.load('cgc')
-  fo <- gr.findoverlaps(gr, gr.pad(cgc.genes, 5e4))
-  tab <- table(fo$subject.id)
-  gene.nums = as.numeric(names(tab))
-  names(tab) <- cgc.genes$gene[gene.nums]
-  tab.lenscale = tab / width(cgc.genes[gene.nums])
-  
-  ## get the genes track data
-  suppressWarnings(td.rg.cgc <- track.refgene(genes = cgc.genes$gene, height=3))
-
-
-  ord = order(tab.lenscale, decreasing=T)
-  dir.create(file.path(opt$outdir, "CGCgenes"), showWarnings=FALSE)
-
-  if (is.null(max.rank))
-    max.rank = length(ord)
-  #assert("max.rank must be <= number of cancer genes (440)", max.rank <= length(ord))
-  
-  ###################
-  ## MAKE PLOTS FOR ALL CANCER GENES
-  ###################
-  dum <- sapply(seq_along(ord)[1:max.rank], function(x) 
-                {
-                  gene = names(tab.lenscale[ord[x]])
-                  ## find the partners
-                  gene.window = gr.pad(cgc.genes[cgc.genes$gene == gene], 5e4)
-                  rar.hits = grl[ceiling(gr.findoverlaps(gr, gene.window)$query.id/2)]
-                  suppressWarnings(windows <- streduce(grbind(gr.pad(streduce(rar.hits), 5e4), gene.window)))
-                  nindiv = length(unique(mcols(rar.hits)$individual))
-                  
-                  print(paste("plotting CGC gene", gene))
-                  pdf(file.path(opt$outdir, "CGCgenes", paste("rank_",sprintf("%04d",x),"_",names(tab.lenscale[ord[x]]), "_NIndiv_", nindiv, ".pdf", sep="")))
-                                        #pdf(file.path(opt$outdir, "ROS1_special.pdf"))  
-                  td.rg.cgc$xaxis.newline = T
-                  td.rg.cgc$xaxis.cex = 0.5
-                  td.rg.cgc$xaxis.cex.label = 0.5
-                  td.rg.cgc$xaxis.nticks = 2
-                  display(td.rg.cgc, links=rar.hits, window=windows)
-                  dev.off()
-                })
-  
-}
-
-
-plot.matrix <- function(opt, ra, bin=5e6) {
-  
-  grt  = gr.tile(gr.all(), w=bin)
-  mat <- sig.tri.matrix(ra, grt, log=TRUE)
-  mat.raw <- sig.tri.matrix(ra, grt, log=FALSE)
-  allopts = list()
-  td.mat  <- do.call('trackData', c(allopts, list(grt, mdata=mat, triangle=TRUE,
-                                                  cmap.min=min(mat), cmap.max=max(mat)+0.1, track.name='Triangle',
-                                                  height=25, sep.lwd=0.5, m.bg.col='white',
-                                                  track.name='Breakpoint-pair Heatmap', islog=TRUE, xaxis.nticks=0,
-                                                  xaxis.prefix="", xaxis.chronly=TRUE)))
-  td.mat.raw  <- do.call('trackData', c(allopts, list(grt, mdata=mat.raw, triangle=TRUE,
-                                                      cmap.min=min(mat.raw), cmap.max=max(mat.raw)+1, track.name='Triangle',
-                                                      height=25, sep.lwd=0.5, m.bg.col='white',
-                                                      track.name='Breakpoint-pair Heatmap', islog=FALSE, xaxis.nticks=0,
-                                                      xaxis.prefix="", xaxis.chronly=TRUE)))
-  
-  pdf("overview_matrix.pdf", width=12, height=15)
-  display(td.mat, windows=streduce(gr.all()))
-  dev.off()
-  
-  pdf("overview_matrix_raw.pdf", width=12, height=12)
-  display(td.mat.raw, windows=streduce(gr.all()))
-  dev.off()
-  
-  ## per chrom
-  grt  = gr.tile(gr.all(), w=bin)
-  td.mat  <- do.call('trackData', c(allopts, list(grt, mdata=mat, triangle=TRUE,
-                                                  cmap.min=min(mat)+0.1, cmap.max=max(mat)+0.1, track.name='Triangle',
-                                                  height=25, sep.lwd=0.5, m.bg.col='white',
-                                                  track.name='Breakpoint-pair Heatmap', islog=TRUE, xaxis.nticks=0,
-                                                  xaxis.prefix="", xaxis.chronly=TRUE)))
-  if (FALSE)
-  dum <- lapply(seq(23), function(x) {
-    print(paste("plotting for chr", x))
-    pdf( paste("chr",x,"_matrix.pdf",sep=""), width=12, height=12)
-    display(td.mat, windows=streduce(gr.all()[x]))
-    dev.off()
-  })
-  
-  
-}
-
-#################
-## power.law.plot
-#################
-
-round.n <- function(x, n) n * round(x / n)
-
-lm_eqn <- function(m){
-    eq <- substitute(italic(y) == a + b %.% italic(x)*","~~italic(r)^2~"="~r2,
-                              list(a = format(coef(m)[1], digits = 2),
-                                                 b = format(coef(m)[2], digits = 2),
-                                                r2 = format(summary(m)$r.squared, digits = 3)))
-    as.character(as.expression(eq));
-}
-
-power.law.plot <- function(pspan, plotname) {
-  print(paste('...making power-law plot for', plotname))
-  ex <- ecdf(pspan[pspan > 0])
-  #grid <- c(seq(0,10000,5), seq(10000,10^7,100))
-  df = data.frame(pspan = pspan, cdf = ex(pspan), pspan.log = log(pspan,10), cdf.log = log(ex(pspan), 10))
-  df <- df[df$cdf.log > -1000,] ## get rid of -Inf
-  lm.s <- lm(df$cdf.log ~ df$pspan.log)
-  lm.eq = lm_eqn(lm.s)
-
-  yb = c(0.01,0.02,0.03,0.04,0.05,0.10,0.2, 0.3, 0.4,0.5,0.75,1)
-
-  pdf(opt$outdir, plotname, width=5,height=5)
-  print(g <- ggplot() + geom_point(data=df, aes(x=pspan.log, y=cdf.log), size=1, color="blue") +
-    geom_smooth(data=df, aes(x=pspan.log, y=cdf.log), method="lm",se=F) +
-        geom_text(aes(x=4.5,y=log(0.01,10), label=lm.eq), label=lm.eq, parse=T) +
-    theme_bw() + ylab("CDF") + xlab("Span (bp)") +
-    scale_y_continuous(breaks=log(yb,10), labels=format(yb,digits=2), limits=c(log(yb[1],10), 0)) +
-    scale_x_continuous(breaks=seq(0,7), labels=parse(text=paste('10', seq(0,7), sep='^'))))
-  dev.off()
-}
-
-##############################
-#### MAIN SIGNIFICANCE PIPELINE
-##############################
-
-## load the data
+## load the data from VCF files is we didn't already load data
 if (nrow(ra) == 0){
   print('...importing VCF files')
   ra <- import.vcf(opt$VCFlist, cache.file = "", mc.cores=opt$cores)
@@ -226,55 +82,72 @@ print(paste("...after removal:", nrow(ra)))
 #@!!! should move span processing to import.vcf
 print('...calculating event spans for all events')
 ra[, span := abs(end[1]-end[2]) * (seqnames[1] == seqnames[2]), by=uid]
-ra$span[ra$span == 0] <- NA
+
 
 ## length filter
 print(paste("removing events less than",opt$lengthCutoff,"bases"))
 ra <- ra[is.na(ra$span) | ra$span >= opt$lengthCutoff]
 print(paste("...after sanger filter:", nrow(ra)))
 
+## add in the sifs data
+print("...reading SIFS file and annotating regions")
+sifs <- read.sifs()
+if (!"analysis.id" %in% colnames(ra))
+  ra$analysis.id <- gsub("(.*?).svcp_.*", "\\1", ra$uid)
+if (!"short_code" %in% colnames(ra))
+  ra$short_code <- sifs$short_code[match(ra$analysis.id, sifs$Tumour.Analyzed.Sample.Aliquot.GUUID)]
+
 ## cache it
 print("...saving the imported breaks to ra.rds")
 saveRDS(ra, "ra.rds")
 
-#######################
-#### CODE FOR METHOD COMPARISON
-#######################
-## set the logical for methods
-##   s  = mcols(ra.bound)$CALLER == "S"
-##   d = mcols(ra.bound)$CALLER == "D"
-##   ds = mcols(ra.bound)$CALLER == "DS"
+##########################################
+### BASIC PLOTTING OF THE RAW DATA
+##########################################
+print("...plotting counts by tumor type")
+g <- sig.type.plot(ra)
+pdf("counts_by_type.pdf", width=15); print(g); dev.off()
 
-## ## make the overlap pie chart
-## cols = c(ovlp.hue, dran.hue, snow.hue)
-## levs = c("Both", "dRanger", "SnowmanSV")
-## df <- data.frame(Caller=c("SnowmanSV", "dRanger", "Both"), counts=c(sum(s, na.rm=T), sum(d, na.rm=T), sum(ds, na.rm=T)), stringsAsFactors=FALSE)
-## g <- ggplot(df, aes(x=factor(1), y=counts, fill=Caller)) + geom_bar(stat='identity', position="fill") + coord_polar(theta="y") + xlab("") + ylab("") +
-##   scale_fill_manual(values=cols, breaks=levs)
-## pdf(file.path(opt$outdir, "caller_overlap_pie.pdf")); print(g); dev.off()
-###############################
+## plot top hits bar graph
+g <- sig.plot.gene.hits(ra)
+pdf("raw_gene_hits.pdf", width=25, height=7); print(g[[1]]); dev.off()
+g <- sig.plot.gene.hits(ra, exclude.fragile=T, exclude.large=T)
+pdf("raw_gene_hits_nofrag.pdf", width=25, height=7); print(g[[1]]); dev.off()
 
-## make the 1/L distribution
-#power.law.plot(span[which(d)], "power_law_D.pdf")
+## plot top hits bar graph per tumor type
+setkey(ra, short_code)
+mclapply(unique(ra$short_code), function(x)
+         {
+           g <- sig.plot.gene.hits(ra, x)
+           pdf(paste(x,"raw_gene_hits.pdf", sep=""), width=25, height=7); print(g[[1]]); dev.off()
+           pdf(paste(x,"enrichment.pdf", sep=""), width=25, height=7); print(g[[3]]); dev.off()
+         }, mc.cores=opt$cores)
 
-if (!opt$hitplots || TRUE) {
+## plot top hits bar graph per tumor type, excluding large and fragile genes
+setkey(ra, short_code)
+mclapply(unique(ra$short_code), function(x)
+         {
+           g <- sig.plot.gene.hits(ra, x, exclude.fragile=T, exclude.large=T)
+           pdf(paste(x,"raw_gene_hits_nofrag.pdf", sep=""), width=25, height=7); print(g[[1]]); dev.off()
+         }, mc.cores=opt$cores)
 
-  ## matrix plot
-  print('...plotting event 2D matrix')
-  plot.matrix(opt, ra, bin=5e6)
+
+## matrix plot
+#print('...plotting event 2D matrix')
+#plot.matrix(opt, ra, bin=5e6)
 
 ################################################
 ## Start the significance testing ##
 ################################################
 
-  ## load data for 1e6 binned mapping
-  print('...loading 1d mappability scores')
-  dload <- sig.load.bins('1e6')
-  drt <- dload$grt
-  
-  ## calculate the 2d background from 1/L and 1d mappablities
-  print('...calculating 2d background with 1/L, using 1d mappabilities')
-  mat.background = sig.2d.background.from.1d.probs(drt)
+## load data for 1e6 binned mapping
+print('...loading 1d mappability scores')
+dload <- sig.load.bins('1e6')
+drt <- dload$grt
+
+## calculate the 2d background from 1/L and 1d mappablities
+print('...calculating 2d background with 1/L, using 1d mappabilities')
+mat.background = sig.2d.background.from.1d.probs(drt)
 
   ## place events into bins
   fo <- sig.bin.counts(ra, drt)
@@ -372,15 +245,14 @@ fo[, individual := ra$individual[subject.id]]
 fo[, num_uniq_samples := length(unique(individual)), by='query.id']
 
 ## read in the SIFS file
+
 print("...reading SIFS file and annotating regions")
-sifs <- data.table(read.delim("/cga/fh/pancan_data/pcawg_calls/pcawg_train2_metadata/PCAWG_Data_Freeze_Train_2.0_Paired_Download_table_2014_11_18-2171_Tumour-Normal_pairs_2014_11_18.tsv", header=TRUE, sep='\t', stringsAsFactors=FALSE))
-sifs[, short_code := gsub("([A-Z]+).*", '\\1',Project.Code) ]
-setkey(sifs, Tumour.Analyzed.Sample.Aliquot.GUUID)  
+sifs <- read.sifs()
+
 fo[, id := gsub("(.*)?.svcp.*", '\\1', individual)]
 fo$study <- sifs[fo$id]$Study
 fo$code <- sifs[fo$id]$short_code
 setkey(fo, query.id)
-
 
 ## need this for below
 num.vcf = length(unique(ra$individual))
@@ -426,21 +298,16 @@ if (opt$hitplots) {
 
 suppressWarnings(td.refgenes <- track.refgene())
 dir.create("topsighits", showWarnings=FALSE)
+
+print("...Reformattting data into GRanges for plotting")
+ra.bound <- breaks.dt2grl(ra)
+
 ### plot all the hits above -log10(q) = 1
 drt[, n.log10.q :=  -log(qval,10)]
 which.hits <-  which(drt$n.log10.q > 1)
 hitnum <- 0 # counter: used?
 
-cgc.genes <- track.load('cgc')
-td.rg.cgc <- trackData(cgc.genes)
-##
-print("...Reformattting data into GRanges for plotting")
-radf <- data.frame(seqnames=ra$seqnames, start=ra$start, end=ra$end, uid=ra$uid, strand=ra$strand, col=ra$col, border=ra$border)
-ra.ul = gr.fix(dt2gr(data.table(radf)),hg19_len)
-ra.bound = split(ra.ul, ra$uid)
-
-mcols(ra.bound)$col <- ra.ul$col[seq(1,length(ra.ul), by=2)]
-mcols(ra.bound)$border <- ra.ul$border[seq(1,length(ra.ul), by=2)]
+td.rg.cgc <- gTrack(cgc.genes)
 
 ## loop through hits and plot
 dum <- lapply(seq_along(which.hits), function(x) {
